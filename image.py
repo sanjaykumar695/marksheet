@@ -3,138 +3,217 @@ import cv2
 import numpy as np
 from PIL import Image
 from difflib import get_close_matches
-from collections import defaultdict
 import re
 import matplotlib.pyplot as plt
 
-# ------------- Image Preprocessing Function -------------
-def preprocess_image(input_path, output_path='processed.png'):
+def preprocess_certificate_image(input_path, output_path='preprocessed_certificate.png'):
+    """
+    Enhanced preprocessing pipeline for certificate images with:
+    - Standardized color conversion
+    - Adaptive contrast enhancement
+    - Noise reduction optimized for text
+    - Improved binarization
+    - Size normalization
+    """
+    # Read image
     image = cv2.imread(input_path)
-
-    # Convert to grayscale
+    
+    # 1. Standardize size (maintain aspect ratio)
+    target_height = 1500
+    h, w = image.shape[:2]
+    scale = target_height / h
+    image = cv2.resize(image, (int(w * scale), target_height), interpolation=cv2.INTER_AREA)
+    
+    # 2. Convert to grayscale using luminosity method (better for human perception)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-    # Remove noise but preserve edges
-    filtered = cv2.bilateralFilter(gray, 11, 17, 17)
-
-    # Increase contrast
-    #contrast = cv2.equalizeHist(filtered)
-
-    # Thresholding (Otsu Binarization)
-    _, thresh = cv2.threshold(contrast, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    # Resize if height is too small
-    h, w = thresh.shape
-    if h < 1000:
-        scale = 1000 / h
-        thresh = cv2.resize(thresh, (int(w * scale), 1000), interpolation=cv2.INTER_CUBIC)
-
-    # Save processed image
-    cv2.imwrite(output_path, thresh)
+    
+    # 3. Contrast Limited Adaptive Histogram Equalization (CLAHE)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    contrast = clahe.apply(gray)
+    
+    # 4. Denoising - Non-local Means for better text preservation
+    denoised = cv2.fastNlMeansDenoising(contrast, None, h=10, templateWindowSize=7, searchWindowSize=21)
+    
+    # 5. Adaptive thresholding with optimized parameters
+    thresh = cv2.adaptiveThreshold(
+        denoised, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        blockSize=11,  # Odd size, larger for more consistent backgrounds
+        C=2  # Fine-tuned for certificate text
+    )
+    
+    # 6. Morphological operations to clean up text
+    kernel = np.ones((2, 2), np.uint8)
+    processed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+    
+    # 7. Standardize output to black text on white background
+    final_image = cv2.bitwise_not(processed)
+    
+    # Save
+    cv2.imwrite(output_path, final_image)
     return output_path
 
-# ------------- Mark Extraction Function -------------
-def extract_marks(image_path):
-    # Load processed image
+def extract_subject_marks(image_path):
+    """
+    Enhanced mark extraction with:
+    - Better text grouping
+    - Improved subject matching
+    - More robust mark detection
+    """
     img = Image.open(image_path)
     image_height = img.height
-    adaptive_y_threshold = image_height // 50  # dynamic row grouping
-
-    # Load OCR reader
-    reader = easyocr.Reader(['en'])
-
-    # Run OCR
-    results = reader.readtext(image_path)
-
-    # Extract confident text
+    y_threshold = image_height // 40  # More precise line grouping
+    
+    # Initialize EasyOCR with optimized settings
+    reader = easyocr.Reader(['en'], 
+                          gpu=True,
+                          model_storage_directory='./model',
+                          download_enabled=True)
+    
+    # Read text with confidence threshold
+    results = reader.readtext(image_path, 
+                            paragraph=False,
+                            min_size=10,
+                            text_threshold=0.7,
+                            low_text=0.4,
+                            link_threshold=0.4,
+                            canvas_size=2560)
+    
+    # Extract and filter text
     lines = []
-    min_confidence = 0.5
-    for (tl, tr, br, bl), text, conf in results:
-        if conf >= min_confidence:
-            x, y = int(tl[0]), int(tl[1])
+    for (bbox, text, conf) in results:
+        if conf >= 0.6:  # Higher confidence threshold
+            x, y = int(bbox[0][0]), int(bbox[0][1])
             lines.append({'text': text.strip().upper(), 'x': x, 'y': y})
-
-    # Sort and group lines into rows
+    
+    # Group lines into rows with dynamic threshold
     lines_sorted = sorted(lines, key=lambda l: (l['y'], l['x']))
     rows = []
-    current_row = []
-    for line in lines_sorted:
-        if not current_row:
-            current_row.append(line)
-        else:
-            if abs(line['y'] - current_row[-1]['y']) <= adaptive_y_threshold:
+    if lines_sorted:
+        current_row = [lines_sorted[0]]
+        for line in lines_sorted[1:]:
+            # Dynamic threshold based on average height of current row
+            avg_height = sum(abs(l['y'] - current_row[0]['y']) for l in current_row) / len(current_row)
+            threshold = max(y_threshold, avg_height * 1.5)
+            
+            if abs(line['y'] - current_row[0]['y']) <= threshold:
                 current_row.append(line)
             else:
                 rows.append(current_row)
                 current_row = [line]
-    if current_row:
-        rows.append(current_row)
-
-    # List of possible subjects
-    common_subjects = [
-        'TAMIL', 'ENGLISH', 'PHYSICS', 'CHEMISTRY',
-        'BIOLOGY', 'MATHEMATICS', 'MATHS', 'COMPUTER SCIENCE',
-        'HISTORY', 'GEOGRAPHY', 'ECONOMICS', 'COMMERCE',
-        'ACCOUNTANCY', 'SCIENCE', 'SOCIAL SCIENCE'
-    ]
-
-    # Match subjects and extract marks
+        if current_row:
+            rows.append(current_row)
+    
+    # Enhanced subject list with common variations
+    common_subjects = {
+        'TAMIL': ['TAMIL', 'TML', 'TAMIZH'],
+        'ENGLISH': ['ENGLISH', 'ENG', 'ENGL'],
+        'MATHEMATICS': ['MATHEMATICS', 'MATHS', 'MATH', 'MATHEMATIC'],
+        'PHYSICS': ['PHYSICS', 'PHY', 'PHYS'],
+        'CHEMISTRY': ['CHEMISTRY', 'CHEM', 'CHY'],
+        'BIOLOGY': ['BIOLOGY', 'BIO', 'BIOL'],
+        'COMPUTER SCIENCE': ['COMPUTER SCIENCE', 'COMPUTER', 'CS', 'COMP SCI'],
+        'HISTORY': ['HISTORY', 'HIST', 'HIS'],
+        'GEOGRAPHY': ['GEOGRAPHY', 'GEOG', 'GEO'],
+        'ECONOMICS': ['ECONOMICS', 'ECON', 'ECO'],
+        'COMMERCE': ['COMMERCE', 'COMM', 'COMRCE'],
+        'ACCOUNTANCY': ['ACCOUNTANCY', 'ACCOUNT', 'ACC', 'ACCNT'],
+        'SCIENCE': ['SCIENCE', 'SCI', 'SCE'],
+        'SOCIAL SCIENCE': ['SOCIAL SCIENCE', 'SOCIAL', 'SST', 'SOC SCI']
+    }
+    
+    # Extract subject-mark pairs with improved logic
     subject_marks = {}
     for row in rows:
-        texts = [item['text'] for item in row]
-        subject_guess = None
-        mark_guess = None
-
-        for text in texts:
-            match = get_close_matches(text, common_subjects, n=1, cutoff=0.6)
-            if match:
-                subject_guess = match[0]
-                break
-
+        row_text = ' '.join([item['text'] for item in row])
+        
+        # Find best subject match
+        best_subject = None
+        best_score = 0
+        
+        for subject, variants in common_subjects.items():
+            for variant in variants:
+                # Check for exact matches first
+                if variant in row_text.split():
+                    best_subject = subject
+                    best_score = 1.0
+                    break
+                
+                # Then check partial matches
+                if variant in row_text:
+                    current_score = len(variant) / len(row_text)
+                    if current_score > best_score:
+                        best_score = current_score
+                        best_subject = subject
+        
+        # Find mark (look for numbers at end of line)
+        mark = None
         for item in sorted(row, key=lambda i: i['x'], reverse=True):
-            if re.fullmatch(r'\d{2,3}', item['text']):
-                mark_guess = item['text']
+            # More robust number detection
+            num_match = re.search(r'(\d{2,3})(?:\s*/\s*\d{2,3})?$', item['text'])
+            if num_match:
+                mark = num_match.group(1)
                 break
+        
+        if best_subject and mark:
+            # Handle multiple occurrences (take highest mark)
+            if best_subject in subject_marks:
+                if int(mark) > int(subject_marks[best_subject]):
+                    subject_marks[best_subject] = mark
+            else:
+                subject_marks[best_subject] = mark
+    
+    # Print results with formatting
+    if subject_marks:
+        print("\n📄 Extracted Subject Marks:")
+        max_len = max(len(subj) for subj in subject_marks.keys())
+        for subj, mark in sorted(subject_marks.items()):
+            print(f"{subj.ljust(max_len + 2)}: {mark}")
+        
+        try:
+            total = sum(int(m) for m in subject_marks.values())
+            print(f"\n🧮 Total Marks: {total}")
+        except:
+            print("\n⚠️ Could not calculate total (invalid mark formats)")
+    else:
+        print("\n❌ No subject marks found in the document")
 
-        if subject_guess and mark_guess:
-            subject_marks[subject_guess] = mark_guess
-
-    # Normalize alias
-    if "MATHS" in subject_marks:
-        subject_marks["MATHEMATICS"] = subject_marks.pop("MATHS")
-
-    # Display results
-    print("\n📄 Extracted Subject Marks:")
-    for subj, mark in subject_marks.items():
-        print(f"{subj:<20}: {mark}")
-
-    # Calculate total
-    try:
-        numeric_marks = [int(mark) for mark in subject_marks.values()]
-        print(f"\n🧮 Total Marks         : {sum(numeric_marks)}")
-    except:
-        print("\n❌ Total: Could not calculate (non-numeric mark found)")
-
-# ------------- Optional: Visual Debugging -------------
-def show_image_comparison(original, processed):
-    orig = cv2.imread(original)
-    proc = cv2.imread(processed)
-
-    plt.figure(figsize=(12, 5))
-    plt.subplot(1, 2, 1)
+def show_preprocessing_debug(original_path, processed_path):
+    """Enhanced debug visualization with histograms"""
+    orig = cv2.imread(original_path)
+    proc = cv2.imread(processed_path, cv2.IMREAD_GRAYSCALE)
+    
+    plt.figure(figsize=(15, 8))
+    
+    # Original image
+    plt.subplot(2, 2, 1)
     plt.imshow(cv2.cvtColor(orig, cv2.COLOR_BGR2RGB))
-    plt.title("Original")
-
-    plt.subplot(1, 2, 2)
-    plt.imshow(cv2.cvtColor(proc, cv2.COLOR_BGR2RGB))
-    plt.title("Preprocessed")
-
+    plt.title("Original Image")
+    plt.axis('off')
+    
+    # Original histogram
+    plt.subplot(2, 2, 2)
+    plt.hist(orig.ravel(), 256, [0, 256], color='r')
+    plt.title("Original Histogram")
+    
+    # Processed image
+    plt.subplot(2, 2, 3)
+    plt.imshow(proc, cmap='gray')
+    plt.title("Preprocessed Image")
+    plt.axis('off')
+    
+    # Processed histogram
+    plt.subplot(2, 2, 4)
+    plt.hist(proc.ravel(), 256, [0, 256], color='b')
+    plt.title("Processed Histogram")
+    
     plt.tight_layout()
     plt.show()
 
-# ------------- Main Execution -------------
 if __name__ == "__main__":
-    original_image = 'saran12.jpeg'  # <- change this to your image file
-    processed_image = preprocess_image(original_image)
-    show_image_comparison(original_image, processed_image)
-    extract_marks(processed_image)
+    original_path = 'praveen12.jpeg'  # Replace with your file
+    processed_path = preprocess_certificate_image(original_path)
+    
+    show_preprocessing_debug(original_path, processed_path)
+    extract_subject_marks(processed_path)

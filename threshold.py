@@ -20,7 +20,7 @@ results = reader.readtext(image_path)
 
 # Step 1: Extract confident lines
 lines = []
-min_confidence = 0.5  # skip bad OCR lines
+min_confidence = 0.1  # skip bad OCR lines
 
 for (tl, tr, br, bl), text, conf in results:
     if conf >= min_confidence:
