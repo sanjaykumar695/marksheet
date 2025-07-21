@@ -123,26 +123,24 @@
 import easyocr
 from difflib import get_close_matches
 from collections import defaultdict
+import re
 
 # Initialize OCR reader
 reader = easyocr.Reader(['en'])
 
 # Path to image
-image_path = 'praveen12.jpeg'
+image_path = 'sabesh12.jpeg'  # change this as needed
 results = reader.readtext(image_path)
 
-# Target subjects list
-target_subjects = ['TAMIL', 'ENGLISH', 'PHYSICS', 'CHEMISTRY', 'COMPUTER SCIENCE', 'MATHEMATICS', 'MATHS']
-
-# Step 1: Extract all text elements
+# Step 1: Extract text with coordinates
 lines = []
 for (tl, tr, br, bl), text, conf in results:
     x, y = int(tl[0]), int(tl[1])
     lines.append({'text': text.strip().upper(), 'x': x, 'y': y})
 
-# Step 2: Group text into rows using Y-coordinate proximity
+# Step 2: Group lines by Y-coordinate proximity into rows
 row_map = defaultdict(list)
-y_threshold = 99 # Pixels tolerance to group into a row
+y_threshold = 55
 
 for line in lines:
     y = line['y']
@@ -155,37 +153,50 @@ for line in lines:
     if not matched:
         row_map[y].append(line)
 
-# Step 3: Detect subject and mark in each row
+# Step 3: Extract subjects and marks from each row
 subject_marks = {}
-for row in row_map.values():
-    subject = None
-    mark = None
-    for item in row:
-        # Match subject using fuzzy matching
-        match = get_close_matches(item['text'], target_subjects, n=1, cutoff=0.6)
-        if match:
-            subject = match[0]
-        # Look for a 3-digit mark (usually out of 100) on the right side
-        if item['x'] > 900 and item['text'].isdigit() and len(item['text']) == 3:
-            mark = item['text']
-    if subject and mark:
-        subject_marks[subject] = mark
 
-# Step 4: Handle alias "MATHS" -> "MATHEMATICS"
-if "MATHS" in subject_marks and "MATHEMATICS" not in subject_marks:
+# Common subject keywords to assist fuzzy match
+common_subjects = [
+    'TAMIL', 'ENGLISH', 'PHYSICS', 'CHEMISTRY',
+    'BIOLOGY', 'MATHEMATICS', 'MATHS', 'COMPUTER SCIENCE',
+    'HISTORY', 'GEOGRAPHY', 'ECONOMICS', 'COMMERCE',
+    'ACCOUNTANCY', 'SCIENCE', 'SOCIAL SCIENCE'
+]
+
+for row in row_map.values():
+    texts = [item['text'] for item in row]
+    subject_guess = None
+    mark_guess = None
+
+    # 1. Try to match a subject
+    for text in texts:
+        match = get_close_matches(text, common_subjects, n=1, cutoff=0.6)
+        if match:
+            subject_guess = match[0]
+            break
+
+    # 2. Try to find a mark (prefer 2-3 digit numbers)
+    for item in sorted(row, key=lambda i: i['x'], reverse=True):  # rightmost first
+        if re.fullmatch(r'\d{2,3}', item['text']):
+            mark_guess = item['text']
+            break
+
+    if subject_guess and mark_guess:
+        subject_marks[subject_guess] = mark_guess
+
+# Step 4: Handle "MATHS" → "MATHEMATICS"
+if "MATHS" in subject_marks:
     subject_marks["MATHEMATICS"] = subject_marks.pop("MATHS")
 
-# Step 5: Print subject-wise marks
-print("\nMarks Obtained for 100:")
-for subj in ['TAMIL', 'ENGLISH', 'PHYSICS', 'CHEMISTRY', 'COMPUTER SCIENCE', 'MATHEMATICS']:
-    if subj in subject_marks:
-        print(f"{subj:<18}: {subject_marks[subj]}")
-    else:
-        print(f"{subj:<18}: Not detected")
+# Step 5: Print extracted marks
+print("\n📄 Extracted Subject Marks:")
+for subj, mark in subject_marks.items():
+    print(f"{subj:<20}: {mark}")
 
 # Step 6: Calculate total
 try:
-    total = sum(int(subject_marks[s]) for s in ['TAMIL', 'ENGLISH', 'PHYSICS', 'CHEMISTRY', 'COMPUTER SCIENCE', 'MATHEMATICS'] if s in subject_marks)
-    print(f"\nCalculated Total     : {total}")
+    numeric_marks = [int(m) for m in subject_marks.values()]
+    print(f"\n🧮 Total Marks         : {sum(numeric_marks)}")
 except:
-    print("\nTotal: Not available")
+    print("\n❌ Total: Could not calculate (non-numeric mark found)")
