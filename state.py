@@ -1,4 +1,3 @@
-
 import easyocr
 from difflib import get_close_matches
 from collections import defaultdict
@@ -7,11 +6,11 @@ from collections import defaultdict
 reader = easyocr.Reader(['en'])
 
 # Path to image
-image_path = 'saran12.png'
+image_path = 'sabesh12.jpeg'
 results = reader.readtext(image_path)
 
-# Target subjects list
-target_subjects = ['TAMIL', 'ENGLISH', 'PHYSICS', 'CHEMISTRY', 'BIOLOGY', 'MATHEMATICS', 'MATHS']
+# Target subjects list (including BIOLOGY)
+target_subjects = ['TAMIL', 'ENGLISH', 'PHYSICS', 'CHEMISTRY', 'COMPUTER SCIENCE', 'BIOLOGY', 'MATHEMATICS', 'MATHS']
 
 # Step 1: Extract all text elements
 lines = []
@@ -21,7 +20,7 @@ for (tl, tr, br, bl), text, conf in results:
 
 # Step 2: Group text into rows using Y-coordinate proximity
 row_map = defaultdict(list)
-y_threshold = 1200 # Pixels tolerance to group into a row
+y_threshold = 99  # Pixels tolerance to group into a row
 
 for line in lines:
     y = line['y']
@@ -56,15 +55,28 @@ if "MATHS" in subject_marks and "MATHEMATICS" not in subject_marks:
 
 # Step 5: Print subject-wise marks
 print("\nMarks Obtained for 100:")
-for subj in ['TAMIL', 'ENGLISH', 'PHYSICS', 'CHEMISTRY', 'BIOLOGY', 'MATHEMATICS']:
+for subj in ['TAMIL', 'ENGLISH', 'PHYSICS', 'CHEMISTRY', 'MATHEMATICS']:
     if subj in subject_marks:
         print(f"{subj:<18}: {subject_marks[subj]}")
     else:
         print(f"{subj:<18}: Not detected")
 
-# Step 6: Calculate total
+# Step 6: Detect and print either COMPUTER SCIENCE or BIOLOGY
+if 'COMPUTER SCIENCE' in subject_marks:
+    print(f"{'COMPUTER SCIENCE':<18}: {subject_marks['COMPUTER SCIENCE']}")
+elif 'BIOLOGY' in subject_marks:
+    print(f"{'BIOLOGY':<18}: {subject_marks['BIOLOGY']}")
+else:
+    print(f"{'COMPUTER SCIENCE / BIOLOGY':<18}: Not detected")
+
+# Step 7: Calculate total
 try:
-    total = sum(int(subject_marks[s]) for s in ['TAMIL', 'ENGLISH', 'PHYSICS', 'CHEMISTRY', 'BIOLOGY', 'MATHEMATICS'] if s in subject_marks)
+    total_subjects = ['TAMIL', 'ENGLISH', 'PHYSICS', 'CHEMISTRY', 'MATHEMATICS']
+    if 'COMPUTER SCIENCE' in subject_marks:
+        total_subjects.append('COMPUTER SCIENCE')
+    elif 'BIOLOGY' in subject_marks:
+        total_subjects.append('BIOLOGY')
+    total = sum(int(subject_marks[s]) for s in total_subjects if s in subject_marks)
     print(f"\nCalculated Total     : {total}")
 except:
     print("\nTotal: Not available")
