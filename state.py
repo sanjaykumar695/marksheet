@@ -6,7 +6,7 @@ from collections import defaultdict
 reader = easyocr.Reader(['en'])
 
 # Path to image
-image_path = 'sabesh12.jpeg'
+image_path = 'saran12.jpeg'
 results = reader.readtext(image_path)
 
 # Target subjects list (including BIOLOGY)
