@@ -1,3 +1,5 @@
+# This code dose not give any output
+
 from paddleocr import PaddleOCR
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
