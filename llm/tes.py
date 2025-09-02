@@ -435,48 +435,230 @@
 
 #------------------------------------------------------------------------------------------------------------------------
 
+# from paddleocr import PaddleOCR
+# import re
+# import json
+
+# # Initialize PaddleOCR (English)
+# ocr = PaddleOCR(use_angle_cls=True, lang='en')
+
+# # Load image
+# image_path = "sanjay10.jpeg"
+
+# # Run OCR
+# results = ocr.ocr(image_path, cls=True)
+
+# lines = []
+# for res in results[0]:
+#     text, confidence = res[1]
+#     lines.append(text.strip())
+
+# final_output = []
+
+# # Mapping to clean subject names (you can expand this)
+# subject_map = {
+#     "ENGLISH": "ENGLISH LANGUAGE & LITERATURE",
+#     "TAMIL": "TAMIL",
+#     "MATHEMATICS": "MATHEMATICS STANDARD",
+#     "SCIENCE": "SCIENCE",
+#     "SOCIAL": "SOCIAL SCIENCE",
+#     "INFORMATION": "INFORMATION TECHNOLOGY"
+# }
+
+# for line in lines:
+#     # Extract last 2-3 digit number (possible Total mark)
+#     nums = re.findall(r"\b\d{2,3}\b", line)
+
+#     if nums:
+#         # Try to detect subject name by partial match
+#         for key, clean_name in subject_map.items():
+#             if key in line.upper():
+#                 total = int(nums[-1])  # last number = Total
+#                 final_output.append({
+#                     "Subject": clean_name,
+#                     "Total": total
+#                 })
+
+# print(json.dumps(final_output, indent=4))
+
+#---------------------------------------------------------------------------------------------------------------
+
+# extract_marks.py
 from paddleocr import PaddleOCR
 import re
 import json
+import argparse
+import sys
 
-# Initialize PaddleOCR (English)
-ocr = PaddleOCR(use_angle_cls=True, lang='en')
+# -------------------------
+# Helpers
+# -------------------------
+NUMBER_PATTERN = re.compile(r'\d+(?:/\d+)?')  # matches 32 or 32/40
 
-# Load image
-image_path = "sanjay10.jpeg"
+DEFAULT_SUBJECT_KEYWORDS = [
+    "ENGLISH", "TAMIL", "MATHEMATICS", "MATHEMATICS STANDARD", "SCIENCE",
+    "SOCIAL", "SOCIAL SCIENCE", "INFORMATION", "INFORMATION TECHNOLOGY",
+    "HINDI", "PHYSICS", "CHEMISTRY", "BIOLOGY", "COMPUTER", "COMPUTER SCIENCE"
+]
 
-# Run OCR
-results = ocr.ocr(image_path, cls=True)
+def load_ocr(image_path, use_angle_cls=True, lang='en'):
+    ocr = PaddleOCR(use_angle_cls=use_angle_cls, lang=lang)
+    results = ocr.ocr(image_path, cls=use_angle_cls)
+    # results may be [lines] or []. Normalize to a list-of-lines
+    if not results:
+        return []
+    # PaddleOCR returns a nested structure: results[0] is the list of line entries
+    # but some builds may return slightly different structures — handle both.
+    if isinstance(results[0], list) and results[0] and isinstance(results[0][0], list):
+        lines = results[0]
+    else:
+        # fallback: if results is already a list of line entries
+        lines = results
+    return lines
 
-lines = []
-for res in results[0]:
-    text, confidence = res[1]
-    lines.append(text.strip())
+def build_entries(ocr_lines):
+    """
+    Convert raw PaddleOCR line entries into a list of dicts:
+    { idx, text, conf, cx, cy, box, tokens: [ {raw, val, cx, cy, idx} ] }
+    """
+    entries = []
+    for i, line in enumerate(ocr_lines):
+        # line is like: [box, (text, confidence)] (or similar)
+        try:
+            box = line[0]
+            td = line[1]
+            if isinstance(td, (list, tuple)):
+                text = td[0]
+                conf = td[1] if len(td) > 1 else None
+            else:
+                text = str(td)
+                conf = None
+        except Exception:
+            # robust fallback
+            text = str(line)
+            box = [(0, 0), (0, 0), (0, 0), (0, 0)]
+            conf = None
 
-final_output = []
+        # center of box (approx)
+        cx = sum([pt[0] for pt in box]) / 4.0
+        cy = sum([pt[1] for pt in box]) / 4.0
 
-# Mapping to clean subject names (you can expand this)
-subject_map = {
-    "ENGLISH": "ENGLISH LANGUAGE & LITERATURE",
-    "TAMIL": "TAMIL",
-    "MATHEMATICS": "MATHEMATICS STANDARD",
-    "SCIENCE": "SCIENCE",
-    "SOCIAL": "SOCIAL SCIENCE",
-    "INFORMATION": "INFORMATION TECHNOLOGY"
-}
+        # extract numeric tokens in this line
+        tokens = []
+        for m in NUMBER_PATTERN.finditer(text):
+            raw = m.group()
+            # if fraction like 32/40, use numerator (marks obtained)
+            val = int(raw.split('/')[0])
+            tokens.append({'raw': raw, 'val': val, 'cx': cx, 'cy': cy, 'idx': i})
 
-for line in lines:
-    # Extract last 2-3 digit number (possible Total mark)
-    nums = re.findall(r"\b\d{2,3}\b", line)
+        entries.append({
+            'idx': i,
+            'text': text.strip(),
+            'conf': conf,
+            'cx': cx,
+            'cy': cy,
+            'box': box,
+            'tokens': tokens
+        })
+    return entries
 
-    if nums:
-        # Try to detect subject name by partial match
-        for key, clean_name in subject_map.items():
-            if key in line.upper():
-                total = int(nums[-1])  # last number = Total
-                final_output.append({
-                    "Subject": clean_name,
-                    "Total": total
-                })
+def match_subject_marks(entries, subject_keywords=None, window=2, max_mark=1000):
+    """
+    For each entry whose text contains a subject keyword, find the
+    best numeric token nearby (prefer rightmost and <= max_mark).
+    """
+    if subject_keywords is None:
+        subject_keywords = DEFAULT_SUBJECT_KEYWORDS
 
-print(json.dumps(final_output, indent=4))
+    # flatten tokens for fast searching
+    tokens_all = [t for e in entries for t in e['tokens']]
+
+    results = []
+    seen_subject_texts = set()
+
+    for e in entries:
+        text_upper = e['text'].upper()
+        matched_kw = None
+        for kw in subject_keywords:
+            if kw in text_upper:
+                matched_kw = kw
+                break
+        if not matched_kw:
+            continue
+
+        # avoid duplicates if OCR split the subject across multiple near-identical lines
+        if e['text'] in seen_subject_texts:
+            continue
+        seen_subject_texts.add(e['text'])
+
+        # gather candidate tokens near this line by index-window
+        candidates = [t for t in tokens_all if abs(t['idx'] - e['idx']) <= window]
+
+        # if none, try vertical proximity
+        if not candidates:
+            candidates = [t for t in tokens_all if abs(t['cy'] - e['cy']) < 50]
+
+        # prefer realistic marks (0 <= val <= max_mark)
+        pref = [t for t in candidates if 0 <= t['val'] <= max_mark]
+        chosen = None
+        if pref:
+            # choose the rightmost (largest cx) among preferred
+            chosen = max(pref, key=lambda t: t['cx'])
+        elif candidates:
+            chosen = max(candidates, key=lambda t: t['cx'])
+
+        # fallback: try to find explicit phrases like "Total" or "Marks" in the same line
+        if not chosen:
+            m = re.search(r'(?:Total|Marks(?: Obtained)?|Obtained|Out of)\s*[:\-]?\s*(\d{1,3})', e['text'], re.I)
+            if m:
+                chosen = {'raw': m.group(1), 'val': int(m.group(1)), 'cx': e['cx'], 'cy': e['cy'], 'idx': e['idx']}
+
+        total_value = None
+        if chosen:
+            # if token was a fraction like "32/40", preserve raw and prefer int
+            try:
+                if '/' in chosen['raw']:
+                    # store numerator (obtained marks) as int, and optionally keep raw string
+                    total_value = int(chosen['raw'].split('/')[0])
+                else:
+                    total_value = int(chosen['raw'])
+            except Exception:
+                total_value = chosen['raw']
+
+        results.append({
+            "Subject": e['text'],
+            "Total": total_value
+        })
+
+    return results
+
+# -------------------------
+# Main CLI
+# -------------------------
+def main():
+    parser = argparse.ArgumentParser(description="Extract subject-wise marks from a marksheet image using PaddleOCR.")
+    parser.add_argument("image", help="Path to marksheet image (jpg/png/jpeg)")
+    parser.add_argument("--max-mark", type=int, default=1000, help="Maximum plausible mark to prefer (default: 1000). Reduce to 100 if each subject max is 100.")
+    parser.add_argument("--window", type=int, default=2, help="How many OCR-lines away to consider numeric tokens (default: 2). Increase if marks are on far-right columns.")
+    parser.add_argument("--lang", default="en", help="PaddleOCR lang (default 'en')")
+    parser.add_argument("--debug", action="store_true", help="Print debug info")
+    args = parser.parse_args()
+
+    ocr_lines = load_ocr(args.image, lang=args.lang)
+    if not ocr_lines:
+        print("[]")
+        print("No OCR output detected. Check image path or OCR initialization.", file=sys.stderr)
+        return
+
+    entries = build_entries(ocr_lines)
+    output = match_subject_marks(entries, window=args.window, max_mark=args.max_mark)
+
+    if args.debug:
+        print(">>>> OCR lines (index: text)")
+        for e in entries:
+            print(f"{e['idx']:02d}: {e['text']}  tokens={[(t['raw'], t['cx']) for t in e['tokens']]}")
+        print(">>>> Extracted subject marks")
+    print(json.dumps(output, indent=4))
+
+if __name__ == "__main__":
+    main()
