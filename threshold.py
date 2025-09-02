@@ -8,7 +8,7 @@ import re
 reader = easyocr.Reader(['en'])
 
 # Image path
-image_path = 'sanjay12.jpeg'  # change as needed
+image_path = 'sanjay10.jpeg'  # change as needed
 
 # Read image size to adapt threshold
 img = Image.open(image_path)

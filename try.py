@@ -6,7 +6,7 @@ import re
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 # Load image
-image_path = 'sanjay_10.jpeg'
+image_path = 'sanjay12.jpeg'
 image = Image.open(image_path)
 
 # OCR extract text
